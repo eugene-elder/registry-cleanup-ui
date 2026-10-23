@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Eugene7 registry cleanup checklist</title>
+<style>
+  :root { font-family: system-ui, Segoe UI, sans-serif; color: #1a1a1a; }
+  body { max-width: 980px; margin: 24px auto; padding: 0 16px 100px; }
+  h1 { font-size: 1.35rem; margin-bottom: 0.25rem; }
+  .meta { color: #555; font-size: 0.9rem; margin-bottom: 1rem; }
+  .toolbar, .filters, .auth { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+  .auth { padding: 10px; background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 8px; }
+  input[type=password], input[type=search], input[type=text] { font: inherit; padding: 8px; border: 1px solid #888; border-radius: 6px; min-width: 180px; }
+  button, .file-btn { font: inherit; padding: 8px 14px; border: 1px solid #888; border-radius: 6px; background: #f4f4f4; cursor: pointer; }
+  button.primary { background: #1a5fb4; color: #fff; border-color: #1a5fb4; }
+  button.small { padding: 4px 10px; font-size: 0.85rem; }
+  #status { font-size: 0.9rem; color: #333; flex: 1 1 220px; }
+  details.group { border: 1px solid #ccc; border-radius: 8px; margin: 10px 0; background: #fafafa; }
+  details.group > summary { cursor: pointer; padding: 10px 12px; font-weight: 600; list-style: none; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  details.group > summary::-webkit-details-marker { display: none; }
+  details.group[open] > summary { border-bottom: 1px solid #ddd; background: #f0f4f8; border-radius: 8px 8px 0 0; }
+  .vendor { margin: 0; border-top: 1px solid #e5e5e5; }
+  .vendor > summary { cursor: pointer; padding: 8px 12px 8px 20px; font-weight: 500; background: #fff; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; background: #fff; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #eee; vertical-align: top; }
+  th { background: #f7f7f7; }
+  tr.selected { background: #e8f0fe; }
+  .age-OLD5Y { color: #a51d2d; font-weight: 600; }
+  .age-UNKNOWN { color: #865e00; }
+  .age-CURRENT { color: #1a7f37; }
+  .badge { font-size: 0.75rem; font-weight: 500; color: #444; background: #e8e8e8; padding: 2px 8px; border-radius: 999px; }
+  .footer-save { position: sticky; bottom: 0; background: #fff; border-top: 2px solid #1a5fb4; padding: 12px 0; margin-top: 24px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; z-index: 5; }
+  code { font-size: 0.85em; }
+  .warn { color: #9a6700; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+  <h1>Eugene7 registry cleanup checklist</h1>
+  <p class="meta">Category → vendor groups. <strong>Load from Git</strong> pulls XML; <strong>Save</strong> at bottom pushes <code>selected</code> flags. Token stays in this browser only — never in the repo.</p>
+
+  <div class="auth">
+    <label>GitHub PAT <input type="password" id="pat" placeholder="fine-grained Contents on registry-cleanup" autocomplete="off"/></label>
+    <button type="button" id="savePat">Remember on this device</button>
+    <button type="button" id="clearPat">Forget token</button>
+    <span class="warn">Fine-grained PAT: Contents Read/Write on private <code>eugene-elder/registry-cleanup</code> only.</span>
+  </div>
+
+  <div class="toolbar">
+    <button type="button" class="primary" id="loadGit">Load from Git</button>
+    <button type="button" id="expandAll">Expand all</button>
+    <button type="button" id="collapseAll">Collapse all</button>
+    <button type="button" id="selectOld">Select all OLD5Y</button>
+    <button type="button" id="clearSel">Clear selections</button>
+    <span id="status">Enter PAT → Remember → Load from Git.</span>
+  </div>
+  <div class="filters">
+    <label>Filter <input type="search" id="filter" placeholder="name, vendor, category"/></label>
+    <label><input type="checkbox" id="onlySelected"/> Selected only</label>
+    <label><input type="checkbox" id="onlyOld"/> OLD5Y only</label>
+    <span id="counts"></span>
+  </div>
+  <div id="groups"></div>
+
+  <div class="footer-save">
+    <button type="button" class="primary" id="saveBtn">Save</button>
+    <span>Pushes current checkmarks to GitHub (overwrites <code>inventory.xml</code>). Bottom of page.</span>
+  </div>
+
+<script>
+const GH = {
+  owner: "eugene-elder",
+  repo: "registry-cleanup",
+  path: "inventory.xml",
+  api: "https://api.github.com",
+  tokenKey: "eugene7.registryCleanup.ghPat",
+};
+const CATEGORY_ORDER = [
+  "old-adobe","apple","amd-graphics","nvidia","logitech","printer","remote-access",
+  "sql-express-leftover","sql-folder","sql-component","sql-service","startup-entry",
+  "screen-capture","productivity","dev-tools","other"
+];
+
+let items = [];
+let fileSha = null;
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+function escapeXml(s) { return escapeHtml(s); }
+
+function getToken() {
+  return (document.getElementById("pat").value || localStorage.getItem(GH.tokenKey) || "").trim();
+}
+function headers() {
+  const t = getToken();
+  if (!t) throw new Error("No GitHub PAT — paste and Remember on this device");
+  return {
+    Authorization: "Bearer " + t,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+}
+
+function utf8ToBase64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  bytes.forEach((b) => { bin += String.fromCharCode(b); });
+  return btoa(bin);
+}
+function base64ToUtf8(b64) {
+  const bin = atob(b64.replace(/\n/g, ""));
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+function inferVendor(it) {
+  const p = (it.publisher || "").trim();
+  if (p) {
+    const low = p.toLowerCase();
+    if (low.includes("microsoft")) return "Microsoft";
+    if (low.includes("adobe")) return "Adobe";
+    if (low.includes("advanced micro devices") || low === "amd") return "AMD";
+    if (low.includes("nvidia")) return "NVIDIA";
+    if (low.includes("logitech")) return "Logitech";
+    if (low.includes("techsmith")) return "TechSmith";
+    if (low.includes("expert data")) return "Expert Data Solutions";
+    if (low.includes("apple")) return "Apple";
+    return p;
+  }
+  const n = (it.name || "").trim();
+  const known = [
+    ["Adobe","Adobe"],["Microsoft","Microsoft"],["SQL Server","Microsoft SQL"],
+    ["QuickTime","Apple"],["NVIDIA","NVIDIA"],["AMD ","AMD"],["Logitech","Logitech"],
+    ["Brother","Brother"],["HP ","HP"],["Cisco","Cisco"],["Java","Oracle Java"],
+    ["Nox","Nox"],["Acronis","Acronis"],["Google","Google"],["Citrix","Citrix"],
+  ];
+  for (const [needle, label] of known) {
+    if (n.toLowerCase().includes(needle.toLowerCase())) return label;
+  }
+  const m = n.match(/^([A-Za-z0-9][A-Za-z0-9+.&' -]{1,40})/);
+  return m ? m[1].trim() : "(unknown vendor)";
+}
+function categoryLabel(c) {
+  if (!c) return "Other";
+  return c.replace(/-/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+function ageRank(a) {
+  return a === "OLD5Y" ? 0 : a === "UNKNOWN" ? 1 : 2;
+}
+
+function parseXml(text) {
+  const doc = new DOMParser().parseFromString(text, "application/xml");
+  if (doc.querySelector("parsererror")) throw new Error("Invalid XML");
+  const out = [];
+  doc.querySelectorAll("items > item").forEach((el, idx) => {
+    out.push({
+      id: el.getAttribute("id") || ("item-" + idx),
+      type: el.getAttribute("type") || "app",
+      selected: (el.getAttribute("selected") || "false").toLowerCase() === "true",
+      category: el.getAttribute("category") || "other",
+      ageFlag: el.getAttribute("ageFlag") || "UNKNOWN",
+      source: el.getAttribute("source") || "",
+      publisher: el.getAttribute("publisher") || "",
+      version: el.getAttribute("version") || "",
+      name: (el.querySelector("name") && el.querySelector("name").textContent) || "",
+      installDate: (el.querySelector("installDate") && el.querySelector("installDate").textContent) || "",
+      notes: (el.querySelector("notes") && el.querySelector("notes").textContent) || "",
+    });
+  });
+  return out;
+}
+
+function buildXml() {
+  const asOf = new Date().toISOString();
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!-- selected=true after Save from Pages checklist. -->',
+    `<registryCleanup machine="Eugene7" machineId="152b7bc3-211a-42d1-981e-f1f516226b59" asOf="${asOf}" readOnly="false">`,
+    `  <summary selectedCount="${items.filter(i=>i.selected).length}" itemCount="${items.length}"/>`,
+    "  <items>",
+  ];
+  for (const i of items) {
+    lines.push(
+      `    <item id="${escapeXml(i.id)}" type="${escapeXml(i.type)}" selected="${i.selected?"true":"false"}" category="${escapeXml(i.category)}" ageFlag="${escapeXml(i.ageFlag)}" source="${escapeXml(i.source)}" publisher="${escapeXml(i.publisher)}" version="${escapeXml(i.version)}">` +
+      `<name>${escapeXml(i.name)}</name><installDate>${escapeXml(i.installDate)}</installDate><notes>${escapeXml(i.notes)}</notes></item>`
+    );
+  }
+  lines.push("  </items>", "</registryCleanup>", "");
+  return lines.join("\n");
+}
+
+async function loadFromGit() {
+  const url = `${GH.api}/repos/${GH.owner}/${GH.repo}/contents/${GH.path}`;
+  const res = await fetch(url, { headers: headers() });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error("Load failed " + res.status + ": " + t.slice(0, 200));
+  }
+  const data = await res.json();
+  fileSha = data.sha;
+  items = parseXml(base64ToUtf8(data.content));
+  document.getElementById("status").textContent =
+    "Loaded from Git · " + items.length + " items · sha " + fileSha.slice(0, 7) + " · " + new Date().toLocaleString();
+  render();
+}
+
+async function saveToGit() {
+  if (!items.length) throw new Error("Nothing loaded — Load from Git first");
+  // refresh sha to reduce 409s
+  const getUrl = `${GH.api}/repos/${GH.owner}/${GH.repo}/contents/${GH.path}`;
+  const cur = await fetch(getUrl, { headers: headers() });
+  if (cur.ok) {
+    const j = await cur.json();
+    fileSha = j.sha;
+  }
+  const body = {
+    message: "Update inventory selections " + new Date().toISOString(),
+    content: utf8ToBase64(buildXml()),
+    sha: fileSha,
+  };
+  const res = await fetch(getUrl, {
+    method: "PUT",
+    headers: { ...headers(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error("Save failed " + res.status + ": " + t.slice(0, 240));
+  }
+  const data = await res.json();
+  fileSha = data.content && data.content.sha;
+  document.getElementById("status").textContent =
+    "Saved to Git · " + items.filter((i) => i.selected).length + " selected · " + new Date().toLocaleString();
+}
+
+function filteredItems() {
+  const q = (document.getElementById("filter").value || "").toLowerCase();
+  const onlySel = document.getElementById("onlySelected").checked;
+  const onlyOld = document.getElementById("onlyOld").checked;
+  return items.filter((i) => {
+    if (onlySel && !i.selected) return false;
+    if (onlyOld && i.ageFlag !== "OLD5Y") return false;
+    if (!q) return true;
+    const vendor = inferVendor(i).toLowerCase();
+    return (i.name + " " + i.category + " " + i.notes + " " + vendor + " " + i.publisher).toLowerCase().includes(q);
+  });
+}
+
+function render() {
+  const list = filteredItems();
+  const byCat = new Map();
+  for (const i of list) {
+    const cat = i.category || "other";
+    if (!byCat.has(cat)) byCat.set(cat, new Map());
+    const vendor = inferVendor(i);
+    const vm = byCat.get(cat);
+    if (!vm.has(vendor)) vm.set(vendor, []);
+    vm.get(vendor).push(i);
+  }
+  const catKeys = [...byCat.keys()].sort((a, b) => {
+    const ia = CATEGORY_ORDER.indexOf(a), ib = CATEGORY_ORDER.indexOf(b);
+    const ra = ia === -1 ? 999 : ia, rb = ib === -1 ? 999 : ib;
+    return ra !== rb ? ra - rb : a.localeCompare(b);
+  });
+  const root = document.getElementById("groups");
+  root.innerHTML = "";
+  for (const cat of catKeys) {
+    const vendors = byCat.get(cat);
+    let catCount = 0, catSel = 0, catOld = 0;
+    for (const arr of vendors.values()) {
+      catCount += arr.length;
+      for (const x of arr) { if (x.selected) catSel++; if (x.ageFlag === "OLD5Y") catOld++; }
+    }
+    const det = document.createElement("details");
+    det.className = "group";
+    det.open = catOld > 0 || catCount <= 40;
+    const sum = document.createElement("summary");
+    sum.innerHTML = `<span>${escapeHtml(categoryLabel(cat))}</span>` +
+      `<span class="badge">${catCount} items</span>` +
+      (catOld ? `<span class="badge">${catOld} OLD5Y</span>` : "") +
+      (catSel ? `<span class="badge">${catSel} selected</span>` : "") +
+      `<button type="button" class="small" data-cat-select="${escapeHtml(cat)}">Select group OLD5Y</button>`;
+    det.appendChild(sum);
+    for (const vendor of [...vendors.keys()].sort((a, b) => a.localeCompare(b))) {
+      const arr = vendors.get(vendor).slice().sort((a, b) => {
+        const ar = ageRank(a.ageFlag) - ageRank(b.ageFlag);
+        return ar || a.name.localeCompare(b.name);
+      });
+      const vdet = document.createElement("details");
+      vdet.className = "vendor";
+      vdet.open = arr.length <= 12;
+      const vsel = arr.filter((x) => x.selected).length;
+      const vold = arr.filter((x) => x.ageFlag === "OLD5Y").length;
+      vdet.innerHTML = `<summary>${escapeHtml(vendor)} <span class="badge">${arr.length}</span>` +
+        (vold ? ` <span class="badge">${vold} OLD</span>` : "") +
+        (vsel ? ` <span class="badge">${vsel} sel</span>` : "") +
+        ` <button type="button" class="small" data-vendor-select="${escapeHtml(cat)}||${escapeHtml(vendor)}">Select vendor</button></summary>`;
+      const table = document.createElement("table");
+      table.innerHTML = "<thead><tr><th></th><th>Name</th><th>Age</th><th>Notes</th></tr></thead>";
+      const tbody = document.createElement("tbody");
+      for (const i of arr) {
+        const tr = document.createElement("tr");
+        if (i.selected) tr.className = "selected";
+        tr.innerHTML =
+          `<td><input type="checkbox" data-id="${escapeHtml(i.id)}" ${i.selected ? "checked" : ""}/></td>` +
+          `<td>${escapeHtml(i.name)}${i.version ? `<div style="color:#666;font-size:0.8em">${escapeHtml(i.version)}</div>` : ""}</td>` +
+          `<td class="age-${escapeHtml(i.ageFlag)}">${escapeHtml(i.ageFlag)}${i.installDate ? " · " + escapeHtml(i.installDate) : ""}</td>` +
+          `<td>${escapeHtml(i.notes)}</td>`;
+        tbody.appendChild(tr);
+      }
+      table.appendChild(tbody);
+      vdet.appendChild(table);
+      det.appendChild(vdet);
+    }
+    root.appendChild(det);
+  }
+  root.querySelectorAll("input[type=checkbox][data-id]").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      const it = items.find((x) => x.id === cb.getAttribute("data-id"));
+      if (it) it.selected = cb.checked;
+      render();
+    });
+  });
+  root.querySelectorAll("button[data-cat-select]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const cat = btn.getAttribute("data-cat-select");
+      items.forEach((i) => { if ((i.category || "other") === cat && i.ageFlag === "OLD5Y") i.selected = true; });
+      render();
+    });
+  });
+  root.querySelectorAll("button[data-vendor-select]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const [cat, vendor] = (btn.getAttribute("data-vendor-select") || "").split("||");
+      items.forEach((i) => {
+        if ((i.category || "other") === cat && inferVendor(i) === vendor) i.selected = true;
+      });
+      render();
+    });
+  });
+  document.getElementById("counts").textContent =
+    `${list.length} shown · ${items.filter((x) => x.selected).length} selected · ${items.length} total · ${catKeys.length} categories`;
+}
+
+document.getElementById("savePat").addEventListener("click", () => {
+  const t = document.getElementById("pat").value.trim();
+  if (!t) { document.getElementById("status").textContent = "Paste a PAT first."; return; }
+  localStorage.setItem(GH.tokenKey, t);
+  document.getElementById("status").textContent = "Token saved in this browser only.";
+});
+document.getElementById("clearPat").addEventListener("click", () => {
+  localStorage.removeItem(GH.tokenKey);
+  document.getElementById("pat").value = "";
+  document.getElementById("status").textContent = "Token forgotten on this device.";
+});
+document.getElementById("loadGit").addEventListener("click", () => {
+  loadFromGit().catch((e) => { document.getElementById("status").textContent = String(e.message || e); });
+});
+document.getElementById("saveBtn").addEventListener("click", () => {
+  saveToGit().catch((e) => { document.getElementById("status").textContent = String(e.message || e); });
+});
+document.getElementById("filter").addEventListener("input", render);
+document.getElementById("onlySelected").addEventListener("change", render);
+document.getElementById("onlyOld").addEventListener("change", render);
+document.getElementById("selectOld").addEventListener("click", () => {
+  items.forEach((i) => { if (i.ageFlag === "OLD5Y") i.selected = true; });
+  render();
+});
+document.getElementById("clearSel").addEventListener("click", () => {
+  items.forEach((i) => { i.selected = false; });
+  render();
+});
+document.getElementById("expandAll").addEventListener("click", () => {
+  document.querySelectorAll("details").forEach((d) => { d.open = true; });
+});
+document.getElementById("collapseAll").addEventListener("click", () => {
+  document.querySelectorAll("details").forEach((d) => { d.open = false; });
+});
+
+(function init() {
+  const t = localStorage.getItem(GH.tokenKey);
+  if (t) {
+    document.getElementById("pat").value = t;
+    document.getElementById("status").textContent = "Token found on this device — tap Load from Git.";
+  }
+})();
+</script>
+</body>
+</html>
